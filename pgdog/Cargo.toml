@@ -107,3 +107,4 @@ wiremock = "0.6"
 tokio = { workspace = true, features = ["test-util"] }
 divan = "0.1.21"
 pgdog-macros = { path = "../pgdog-macros" }
+hegeltest = "0.53"

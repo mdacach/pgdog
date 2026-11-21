@@ -2761,6 +2761,93 @@ mod test {
         );
     }
 
+    // Tests that the same select query with equivalent UUID shard keys route to
+    // the same shard.
+    #[hegel::test]
+    fn equivalent_uuid_keys_route_to_the_same_shard(tc: hegel::TestCase) {
+        // The column data type is fixed and known from the schema.
+        let column_data_type = DataType::Uuid;
+
+        let uuid_as_text = tc.draw_named("uuid", hegel::generators::uuids());
+        let uuid =
+            uuid::Uuid::parse_str(&uuid_as_text).expect("hegel generator produces valid UUIDs");
+
+        // A plain query would simply send the UUID directly.
+        let plain_query = "SELECT * FROM users WHERE tenant_id = $1";
+        // But a query with a cast might also send the UUID as text.
+        let cast_query = "SELECT * FROM users WHERE tenant_id = $1::uuid";
+
+        // We first establish the expected sharding result based on one of the
+        // queries. Because all queries will have equivalent shard keys, we
+        // expect all of them to route to the same shard.
+        let expected_shard = {
+            let text_bind = Bind::new_params_codes(
+                "",
+                &[Parameter::new(uuid_as_text.as_bytes())],
+                &[Format::Text],
+            );
+            let expected =
+                run_test_with_column_data_type(plain_query, Some(&text_bind), column_data_type)
+                    .expect("text-encoded UUID should route correctly")
+                    .expect("UUID routing should target some shard");
+
+            // Because of how the test helper is setup, the query should be
+            // routed to one of the three existing shards. _Which_ shard it
+            // targets is not relevant here, and it will change based on the
+            // generated UUID.
+            assert!(
+                matches!(expected, Shard::Direct(0..3)),
+                "{uuid_as_text}: {expected:?}"
+            );
+
+            expected
+        };
+
+        // Collect all failures to make debugging easier.
+        // (Otherwise, the first failure would stop the test).
+        let mut failures = vec![];
+
+        // Generate equivalent queries with different bind value representations.
+        // Crucially as of the time of this writing, the router does not have access
+        // to the "source_type", which designates how the query's payload should be
+        // interpreted (and thus which routing function to use).
+        for (source_type, query, wire_format, payload_bytes) in [
+            ("uuid", plain_query, Format::Text, uuid_as_text.as_bytes()),
+            (
+                "uuid",
+                plain_query,
+                Format::Binary,
+                uuid.as_bytes().as_slice(),
+            ),
+            ("text", cast_query, Format::Text, uuid_as_text.as_bytes()),
+            ("text", cast_query, Format::Binary, uuid_as_text.as_bytes()),
+        ] {
+            // Note that the router currently has no access to "source_type",
+            // that would allow it to differentiate the ambiguous cases.
+            let bind = Bind::new_params_codes("", &[Parameter::new(payload_bytes)], &[wire_format]);
+
+            let result = run_test_with_column_data_type(query, Some(&bind), column_data_type);
+            match result {
+                Ok(Some(routed_shard)) if routed_shard == expected_shard => {}
+                other => {
+                    failures.push(format!(
+                        "source_type={source_type}\n\
+                         query={query}\n\
+                         wire_format={wire_format:?}\n\
+                         payload_bytes={payload_bytes:?}\n\
+                         result={other:?}"
+                    ));
+                }
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "uuid={uuid}\nexpected_shard={expected_shard}\n\n{}",
+            failures.join("\n\n")
+        );
+    }
+
     #[test]
     fn test_column_with_text_value_sent_as_binary_and_cast() {
         let cast_result = run_test_with_column_data_type(

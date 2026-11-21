@@ -3,6 +3,10 @@
 debug/
 target/
 
+# Hegel's generated example database does not have a stable format and is best
+# kept local. Regressions should be explicitly added as test cases.
+.hegel/
+
 # IDEs
 .vscode/
 
