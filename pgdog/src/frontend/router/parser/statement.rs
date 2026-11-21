@@ -2761,6 +2761,93 @@ mod test {
         );
     }
 
+    #[test]
+    #[ignore = "shard key decoding can't disambiguate text-encoded integers; issue #1668"]
+    fn integer_shard_routing_agrees_for_binary_text_twelve() {
+        // The column data type for `tenant_id` is `bigint`, but the bind type
+        // might be different if the query has a type cast.
+        let query = "SELECT * FROM users WHERE tenant_id = $1::bigint";
+
+        // The routing logic does not currently have knowledge of the actual
+        // bind type, so it relies on the wire format (binary or text) and the
+        // column data type in order to interpret the payload.
+
+        // If the bind type is "text", this might be an issue:
+
+        // If the wire format is itself "text", the decoder parses it as text,
+        // and then as the column's data type. No problems here.
+        let text_bind =
+            Bind::new_params_codes("", &[Parameter::new(b"12" /* [49, 50] */)], &[Format::Text]);
+        let text_shard = run_test_with_column_data_type(query, Some(&text_bind), DataType::Bigint)
+            .expect("text-encoded 12 should route")
+            .expect("integer equality should identify a shard");
+
+        // If the wire format is "binary", though, it's ambiguous. The decoder
+        // can't know if those bytes are the text-encoding of the value rather
+        // than the value itself. In those cases, it decodes assuming it's the
+        // column's data type itself, which in this case is wrong.
+        let binary_text_bind =
+            Bind::new_params_codes("", &[Parameter::new(b"12")], &[Format::Binary]);
+
+        // Specifically, this means that "12" (with payload [49,50]) actually
+        // gets interpreted as the integer 12594 -- which ends up getting routed
+        // to a different shard.
+        // This is an unfortunate case: the binary payload for "12" (text) is
+        // coincidentally a valid integer for the purposes of the routing, and
+        // there's no way to tell which one it should be.
+        let binary_text_shard =
+            run_test_with_column_data_type(query, Some(&binary_text_bind), DataType::Bigint)
+                .expect("binary text 12 cast to bigint should route")
+                .expect("integer equality should identify a shard");
+
+        assert_eq!(
+            binary_text_shard, text_shard,
+            "the same text parameter cast to bigint should route identically in either wire format"
+        );
+    }
+
+    #[test]
+    #[ignore = "shard key decoding can't disambiguate text-encoded integers; issue #1668"]
+    fn integer_shard_routing_agrees_for_binary_text_zero() {
+        // The column data type for `tenant_id` is `bigint`, but the bind type
+        // might be different if the query has a type cast.
+        let query = "SELECT * FROM users WHERE tenant_id = $1::bigint";
+
+        // The routing logic does not currently have knowledge of the actual
+        // bind type, so it relies on the wire format (binary or text) and the
+        // column data type in order to interpret the payload.
+
+        // If the bind type is "text", this might be an issue:
+
+        // If the wire format is itself "text", the decoder parses it as text,
+        // and then as the column's data type. No problems here.
+        let text_bind =
+            Bind::new_params_codes("", &[Parameter::new(b"0" /* [48] */)], &[Format::Text]);
+        let text_shard = run_test_with_column_data_type(query, Some(&text_bind), DataType::Bigint)
+            .expect("text-encoded 0 should route")
+            .expect("integer equality should identify a shard");
+
+        // If the wire format is "binary", though, it's ambiguous. The decoder
+        // can't know if those bytes are the text-encoding of the value rather
+        // than the value itself. In those cases, it decodes assuming it's the
+        // column's data type itself, which in this case is wrong.
+        let binary_text_bind =
+            Bind::new_params_codes("", &[Parameter::new(b"0")], &[Format::Binary]);
+
+        // Specifically, this means that "0" (with payload [48]) gets decoded as
+        // a binary integer. Because its one-byte payload is not a valid payload
+        // for any Postgres integer type, the routing fails.
+        let binary_text_shard =
+            run_test_with_column_data_type(query, Some(&binary_text_bind), DataType::Bigint)
+                .expect("one-byte binary text 0 cast to bigint should route")
+                .expect("integer equality should identify a shard");
+
+        assert_eq!(
+            binary_text_shard, text_shard,
+            "the same text parameter cast to bigint should route identically in either wire format"
+        );
+    }
+
     // Tests that the same select query with equivalent integer shard keys route
     // to the same shard.
     #[hegel::test]
