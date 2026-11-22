@@ -8,6 +8,47 @@ use crate::{
 
 use super::prelude::*;
 
+/// A text parameter's binary payload is still string bytes, even when SQL
+/// casts the parameter to an integer shard key (issue #1668).
+#[tokio::test]
+async fn text_parameter_cast_to_bigint_routes_in_both_wire_formats() {
+    use crate::net::Format;
+
+    let mut client = TestClient::new_sharded(Parameters::default()).await;
+    for (name, format) in [
+        ("text_key", Format::Text),
+        ("binary_text_key", Format::Binary),
+    ] {
+        client
+            .send(
+                Parse::named(name, "SELECT count(*) FROM sharded WHERE id = $1::bigint")
+                    .with_data_types(&[25]), // Declare $1 as text, not bigint.
+            )
+            .await;
+        client
+            .send(Bind::new_params_codes(
+                name,
+                &[Parameter::new(b"0")],
+                &[format],
+            ))
+            .await;
+        client.send(Execute::new()).await;
+        client.send(Sync).await;
+        client.try_process().await.expect("process client messages");
+
+        let result = client.read_until('Z').await;
+        assert!(
+            result.is_ok(),
+            "text-typed key 0 in {format:?} format must succeed: {result:?}"
+        );
+        let messages = result.expect("query succeeded");
+        assert!(
+            messages.iter().any(|message| message.code() == 'D'),
+            "count query should return a row in {format:?} format"
+        );
+    }
+}
+
 /// Test extended protocol with named prepared statement, parameter binding, and Describe.
 #[tokio::test]
 async fn test_extended_with_params_and_describe() {
